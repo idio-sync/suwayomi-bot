@@ -1,0 +1,12 @@
+# Your Discord bot's token from the Discord Developer Portal
+DISCORD_TOKEN=your_token
+GUILD_ID=your_server_id
+
+# The base URL for your Suwayomi-Server instance
+SUWAYOMI_URL=http://ip:port
+SUWAYOMI_API_KEY=your_api_key
+
+# (Optional) The Discord channel ID for new chapter notifications
+# NOTIFICATION_CHANNEL_ID=your_channel_id
+
+LOG_LEVEL=INFO
