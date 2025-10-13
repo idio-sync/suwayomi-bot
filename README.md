@@ -37,7 +37,7 @@ A powerful Discord bot that integrates with [Suwayomi-Server](https://github.com
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/suwayomi-discord-bot.git
+git clone https://github.com/idio-sync/suwayomi-discord-bot.git
 cd suwayomi-discord-bot
 ```
 
