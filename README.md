@@ -22,10 +22,6 @@ A powerful Discord bot that integrates with [Suwayomi-Server](https://github.com
 - **Detailed Metadata** - Shows author, artist, genres, status, and chapter info
 - **NSFW Filtering** - Optional NSFW source filtering
 
-### 🛠️ Developer Tools
-- **Schema Inspector** - Debug GraphQL schema types (useful for development)
-- **Comprehensive Logging** - Configurable log levels for troubleshooting
-
 ## Prerequisites
 
 - **Python 3.8+**
