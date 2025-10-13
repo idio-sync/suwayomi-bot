@@ -290,7 +290,7 @@ class MangaSelectView(discord.ui.View):
                 "COMPLETED": "✅ Completed",
                 "LICENSED": "©️ Licensed",
                 "PUBLISHING": "📰 Publishing",
-                "HIATUS": "⏸️ On Hiatus",
+                "HIATUS": "⸏ On Hiatus",
                 "CANCELLED": "❌ Cancelled",
                 "UNKNOWN": "❓ Unknown"
             }.get(status, f"❓ {status}")
@@ -314,13 +314,12 @@ class MangaSelectView(discord.ui.View):
             
             embed.add_field(name="📚 Chapters", value=chapter_info, inline=True)
             
-            # Genres
+            # Genres (limit to first 3)
             genres = manga.get('genre') or []
             if genres and isinstance(genres, list):
-                # Limit and format genres
-                genre_list = genres[:12]  # Limit to 12 genres
-                if len(genres) > 12:
-                    genre_text = ", ".join(genre_list) + f" +{len(genres)-12} more"
+                genre_list = genres[:3]  # Limit to 3 genres
+                if len(genres) > 3:
+                    genre_text = ", ".join(genre_list) + f" +{len(genres)-3} more"
                 else:
                     genre_text = ", ".join(genre_list)
                 embed.add_field(name="🏷️ Genres", value=genre_text, inline=False)
@@ -361,7 +360,7 @@ class MangaSelectView(discord.ui.View):
                 # Add bookmark count if available
                 bookmark_count = manga.get('bookmarkCount', 0)
                 if bookmark_count > 0:
-                    status_text += f"\n📑 {bookmark_count} bookmarks"
+                    status_text += f"\n🔖 {bookmark_count} bookmarks"
                 
                 embed.add_field(name="📚 Library Status", value=status_text, inline=False)
             
@@ -438,6 +437,67 @@ class MangaActionView(discord.ui.View):
         else:
             self.add_button.label = "Add to Library & Download"
             self.add_button.style = discord.ButtonStyle.success
+    
+    def build_full_url(self, path):
+        """Build a proper full URL from Suwayomi's response."""
+        if not path:
+            return None
+        
+        # If it's already a full URL, return it
+        if path.startswith(('http://', 'https://')):
+            return path
+        
+        # Otherwise, prepend the Suwayomi base URL
+        base_url = self.bot.config.SUWAYOMI_URL
+        
+        # Handle relative paths
+        if path.startswith('/'):
+            return f"{base_url}{path}"
+        else:
+            return f"{base_url}/{path}"
+    
+    async def fetch_and_attach_image(self, url):
+        """
+        Fetch an image from URL and prepare it as a Discord attachment.
+        
+        Args:
+            url: The image URL to fetch
+            
+        Returns:
+            discord.File object or None if fetch fails
+        """
+        if not url:
+            return None
+            
+        try:
+            session = await self.bot.ensure_session()
+            
+            # Add headers to mimic a browser request
+            headers = {
+                "User-Agent": "SuwayomiBot/1.0",
+                "Accept": "image/*"
+            }
+            
+            logger.debug(f"Fetching image from: {url}")
+            
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    image_data = await resp.read()
+                    
+                    # Create a Discord file from the image data
+                    # Use BytesIO to create an in-memory file
+                    file = discord.File(io.BytesIO(image_data), filename="manga_cover.jpg")
+                    logger.debug(f"Successfully fetched image, size: {len(image_data)} bytes")
+                    return file
+                else:
+                    logger.debug(f"Failed to fetch image, status: {resp.status}")
+                    
+        except asyncio.TimeoutError:
+            logger.debug(f"Timeout fetching image from {url}")
+        except Exception as e:
+            logger.debug(f"Error fetching image: {e}")
+        
+        return None
     
     @discord.ui.button(label="Add to Library & Download", style=discord.ButtonStyle.success, custom_id="add_manga")
     async def add_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -606,6 +666,7 @@ class MangaActionView(discord.ui.View):
                     description
                     status
                     genre
+                    thumbnailUrl
                     initialized
                 }
             }
@@ -631,6 +692,7 @@ class MangaActionView(discord.ui.View):
                     author = (manga_info.get('author') or '').strip()
                     status = manga_info.get('status', 'UNKNOWN')
                     description = (manga_info.get('description') or '').strip()
+                    genres = manga_info.get('genre') or []
                     
                     if author:
                         success_embed.add_field(name="👤 Author", value=author, inline=True)
@@ -640,17 +702,26 @@ class MangaActionView(discord.ui.View):
                         "COMPLETED": "✅ Completed",
                         "LICENSED": "©️ Licensed",
                         "PUBLISHING": "📰 Publishing",
-                        "HIATUS": "⏸️ On Hiatus",
+                        "HIATUS": "⸏ On Hiatus",
                         "CANCELLED": "❌ Cancelled",
                         "UNKNOWN": "❓ Unknown"
                     }.get(status, f"❓ {status}")
                     
                     success_embed.add_field(name="📊 Status", value=status_display, inline=True)
                     
+                    # Add genres (limit to first 3)
+                    if genres and isinstance(genres, list):
+                        genre_list = genres[:3]
+                        if len(genres) > 3:
+                            genre_text = ", ".join(genre_list) + f" +{len(genres)-3} more"
+                        else:
+                            genre_text = ", ".join(genre_list)
+                        success_embed.add_field(name="🏷️ Genres", value=genre_text, inline=False)
+                    
                     if description:
                         # Truncate description for embed
                         desc_preview = description[:200] + "..." if len(description) > 200 else description
-                        success_embed.add_field(name="📝 Description", value=desc_preview, inline=False)
+                        success_embed.add_field(name="📖 Description", value=desc_preview, inline=False)
                 
                 success_embed.add_field(
                     name="📥 Download Status",
@@ -658,16 +729,21 @@ class MangaActionView(discord.ui.View):
                     inline=False
                 )
                 
-                success_embed.add_field(
-                    name="💡 Next Steps",
-                    value="• Use `/downloads` to monitor progress\n" +
-                          "• Chapters will download in the background",
-                    inline=False
-                )
-                
                 success_embed.set_footer(text=f"Manga ID: {self.manga_id}")
                 
-                await interaction.edit_original_response(embed=success_embed, view=self)
+                # Fetch and attach cover image
+                image_file = None
+                thumbnail_url = manga_info.get('thumbnailUrl') if manga_info else None
+                if thumbnail_url:
+                    full_image_url = self.build_full_url(thumbnail_url)
+                    image_file = await self.fetch_and_attach_image(full_image_url)
+                    if image_file:
+                        success_embed.set_image(url="attachment://manga_cover.jpg")
+                
+                if image_file:
+                    await interaction.edit_original_response(embed=success_embed, view=self, files=[image_file])
+                else:
+                    await interaction.edit_original_response(embed=success_embed, view=self)
             else:
                 button.label = f"✅ Added (Queued {downloaded_count}/{total_chapters})"
                 button.style = discord.ButtonStyle.secondary
@@ -761,7 +837,7 @@ class SuwayomiCog(commands.Cog):
                 inline=True
             )
             embed.add_field(
-                name="🔍 Total Manga", 
+                name="📑 Total Manga", 
                 value=f"{data.get('mangas', {}).get('totalCount', 0):,}", 
                 inline=True
             )
@@ -786,7 +862,7 @@ class SuwayomiCog(commands.Cog):
                 inline=True
             )
             embed.add_field(
-                name="🔌 Sources", 
+                name="📌 Sources", 
                 value=data.get('sources', {}).get('totalCount', 0), 
                 inline=True
             )
@@ -928,12 +1004,6 @@ class SuwayomiCog(commands.Cog):
         embed = discord.Embed(
             title="⬇️ Download Status",
             color=discord.Color.blue() if state == "Running" else discord.Color.greyple()
-        )
-        
-        embed.add_field(
-            name="Downloader State",
-            value=f"{'🟢' if state == 'Running' else '⏸️'} {state}",
-            inline=False
         )
         
         if queue:
