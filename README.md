@@ -59,7 +59,7 @@ Create a `.env` file in the project root:
 ```env
 # Discord Configuration
 DISCORD_TOKEN=your_discord_bot_token_here
-GUILD_ID=your_guild_id_for_testing  # Optional: for faster command sync during development
+GUILD_ID=your_guild_id_for_testing  # Optional: for faster command sync
 
 # Suwayomi Configuration
 SUWAYOMI_URL=http://localhost:4567
@@ -153,19 +153,6 @@ Show current download queue status.
 - Manga and chapter names
 - Download percentage
 
----
-
-### `/inspect_schema`
-*[Developer Tool]* Inspect GraphQL schema types.
-
-**Parameters:**
-- `type_name` (required) - Type to inspect (e.g., "ChapterType", "MangaType")
-
-**Useful for:**
-- Understanding available fields
-- Debugging API queries
-- Development and troubleshooting
-
 ## Configuration
 
 ### Log Levels
@@ -179,7 +166,7 @@ Set `LOG_LEVEL` in your `.env` file:
 
 ### Guild ID (Optional)
 
-Setting `GUILD_ID` makes commands sync instantly to that specific server (useful during development). Without it, commands sync globally (takes up to 1 hour).
+Setting `GUILD_ID` makes commands sync instantly to your specific server. Without it, commands sync globally (takes up to 1 hour).
 
 ## Troubleshooting
 
