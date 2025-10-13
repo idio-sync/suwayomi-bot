@@ -4,7 +4,7 @@ from discord.commands import slash_command, Option
 import logging
 from typing import Optional, Dict, Any
 from datetime import datetime
-from discord.ui import View, Button
+from discord.ui import View, Button, Select
 import asyncio
 
 logger = logging.getLogger('suwayomi_bot.cog')
@@ -42,6 +42,67 @@ class MangaSelectView(discord.ui.View):
         select.callback = self.select_callback
         self.add_item(select)
     
+    def build_full_url(self, path):
+        """Build a proper full URL from Suwayomi's response."""
+        if not path:
+            return None
+        
+        # If it's already a full URL, return it
+        if path.startswith(('http://', 'https://')):
+            return path
+        
+        # Otherwise, prepend the Suwayomi base URL
+        base_url = self.bot.config.SUWAYOMI_URL
+        
+        # Handle relative paths
+        if path.startswith('/'):
+            return f"{base_url}{path}"
+        else:
+            return f"{base_url}/{path}"
+    
+    async def fetch_and_attach_image(self, url):
+        """
+        Fetch an image from URL and prepare it as a Discord attachment.
+        
+        Args:
+            url: The image URL to fetch
+            
+        Returns:
+            discord.File object or None if fetch fails
+        """
+        if not url:
+            return None
+            
+        try:
+            session = await self.bot.ensure_session()
+            
+            # Add headers to mimic a browser request
+            headers = {
+                "User-Agent": "SuwayomiBot/1.0",
+                "Accept": "image/*"
+            }
+            
+            logger.debug(f"Fetching image from: {url}")
+            
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    image_data = await resp.read()
+                    
+                    # Create a Discord file from the image data
+                    # Use BytesIO to create an in-memory file
+                    file = discord.File(io.BytesIO(image_data), filename="manga_cover.jpg")
+                    logger.debug(f"Successfully fetched image, size: {len(image_data)} bytes")
+                    return file
+                else:
+                    logger.debug(f"Failed to fetch image, status: {resp.status}")
+                    
+        except asyncio.TimeoutError:
+            logger.debug(f"Timeout fetching image from {url}")
+        except Exception as e:
+            logger.debug(f"Error fetching image: {e}")
+        
+        return None
+    
     async def select_callback(self, interaction: discord.Interaction):
         """Handle manga selection from dropdown."""
         selected_index = int(interaction.data['values'][0])
@@ -58,7 +119,7 @@ class MangaSelectView(discord.ui.View):
             view=self
         )
         
-        # Fetch full manga details
+        # Fetch full manga details with more fields
         manga_id = self.selected_manga['id']
         
         details_query = """
@@ -75,116 +136,255 @@ class MangaSelectView(discord.ui.View):
                 inLibrary
                 realUrl
                 sourceId
+                lastFetchedAt
+                inLibraryAt
+                initialized
                 chapters {
                     totalCount
+                    nodes(first: 5) {
+                        name
+                        chapterNumber
+                        uploadDate
+                    }
                 }
+                unreadCount
+                downloadCount
+                chapterCount
                 categories {
                     nodes {
                         name
                     }
                 }
+                source {
+                    id
+                    name
+                    displayName
+                    lang
+                }
             }
         }
         """
         
-        manga_details = await self.bot.graphql_query(details_query, {"id": manga_id})
-        
-        if not manga_details or not manga_details.get('manga'):
+        try:
+            manga_details = await self.bot.graphql_query(details_query, {"id": manga_id})
+            
+            if not manga_details or not manga_details.get('manga'):
+                # Try to at least show basic info from search result
+                basic_embed = discord.Embed(
+                    title=self.selected_manga.get('title', 'Unknown'),
+                    description="⚠️ Could not load full details. Basic information shown.",
+                    color=discord.Color.orange()
+                )
+                
+                # Try to add thumbnail from search result
+                image_file = None
+                if self.selected_manga.get('thumbnailUrl'):
+                    thumbnail_url = self.build_full_url(self.selected_manga['thumbnailUrl'])
+                    image_file = await self.fetch_and_attach_image(thumbnail_url)
+                    if image_file:
+                        basic_embed.set_image(url="attachment://manga_cover.jpg")
+                
+                basic_embed.add_field(
+                    name="Source",
+                    value=self.selected_manga.get('source', {}).get('displayName', 'Unknown'),
+                    inline=False
+                )
+                
+                basic_embed.set_footer(text=f"Manga ID: {manga_id}")
+                
+                # Still show the action buttons
+                button_view = MangaActionView(self.bot, self.selected_manga, timeout=300)
+                
+                if image_file:
+                    await interaction.edit_original_response(
+                        content=None,
+                        embed=basic_embed,
+                        view=button_view,
+                        attachments=[image_file]
+                    )
+                else:
+                    await interaction.edit_original_response(
+                        content=None,
+                        embed=basic_embed,
+                        view=button_view
+                    )
+                return
+            
+            manga = manga_details['manga']
+            
+            # Create detailed embed
+            embed = discord.Embed(
+                title=manga['title'],
+                url=self.build_full_url(manga.get('realUrl')) if manga.get('realUrl') else None,
+                color=discord.Color.blue() if not manga.get('inLibrary') else discord.Color.green()
+            )
+            
+            # Add description (truncate if too long)
+            description = manga.get('description', '').strip()
+            if description:
+                if len(description) > 800:
+                    description = description[:797] + "..."
+                embed.description = description
+            else:
+                embed.description = "*No description available*"
+            
+            # Fetch and attach cover image
+            image_file = None
+            thumbnail_url = manga.get('thumbnailUrl')
+            if thumbnail_url:
+                full_image_url = self.build_full_url(thumbnail_url)
+                logger.info(f"Attempting to fetch cover from: {full_image_url}")
+                
+                # Try to fetch and attach the image
+                image_file = await self.fetch_and_attach_image(full_image_url)
+                if image_file:
+                    # Set the embed to use the attached image
+                    embed.set_image(url="attachment://manga_cover.jpg")
+                    logger.info("Successfully attached manga cover image")
+                else:
+                    logger.warning(f"Failed to fetch image from {full_image_url}")
+            
+            # Author and Artist
+            author = manga.get('author', '').strip() or 'Unknown'
+            artist = manga.get('artist', '').strip() or 'Unknown'
+            
+            if author == artist or artist == 'Unknown':
+                if author != 'Unknown':
+                    embed.add_field(name="👤 Creator", value=author, inline=True)
+            else:
+                embed.add_field(name="✏️ Author", value=author, inline=True)
+                embed.add_field(name="🎨 Artist", value=artist, inline=True)
+            
+            # Status with emoji
+            status = manga.get('status', 'UNKNOWN')
+            status_display = {
+                "ONGOING": "📖 Ongoing",
+                "COMPLETED": "✅ Completed",
+                "LICENSED": "©️ Licensed",
+                "PUBLISHING": "📰 Publishing",
+                "HIATUS": "⏸️ On Hiatus",
+                "CANCELLED": "❌ Cancelled",
+                "UNKNOWN": "❓ Unknown"
+            }.get(status, f"❓ {status}")
+            
+            embed.add_field(name="📊 Status", value=status_display, inline=True)
+            
+            # Chapter information
+            total_chapters = manga.get('chapterCount', manga.get('chapters', {}).get('totalCount', 0))
+            unread_count = manga.get('unreadCount', 0)
+            download_count = manga.get('downloadCount', 0)
+            
+            chapter_info = f"**Total:** {total_chapters}"
+            if manga.get('inLibrary'):
+                if unread_count > 0:
+                    chapter_info += f"\n**Unread:** {unread_count}"
+                if download_count > 0:
+                    chapter_info += f"\n**Downloaded:** {download_count}"
+            
+            embed.add_field(name="📚 Chapters", value=chapter_info, inline=True)
+            
+            # Genres
+            genres = manga.get('genre', [])
+            if genres:
+                # Limit and format genres
+                genre_list = genres[:12]  # Limit to 12 genres
+                if len(genres) > 12:
+                    genre_text = ", ".join(genre_list) + f" +{len(genres)-12} more"
+                else:
+                    genre_text = ", ".join(genre_list)
+                embed.add_field(name="🏷️ Genres", value=genre_text, inline=False)
+            
+            # Latest chapters preview
+            recent_chapters = manga.get('chapters', {}).get('nodes', [])
+            if recent_chapters and total_chapters > 0:
+                chapter_preview = []
+                for ch in recent_chapters[:3]:  # Show up to 3 recent chapters
+                    ch_name = ch.get('name', '').strip()
+                    ch_num = ch.get('chapterNumber', 0)
+                    if ch_name and ch_name != f"Chapter {ch_num}":
+                        chapter_preview.append(f"Ch. {ch_num}: {ch_name[:30]}")
+                    else:
+                        chapter_preview.append(f"Chapter {ch_num}")
+                
+                if chapter_preview:
+                    embed.add_field(
+                        name="📖 Recent Chapters",
+                        value="\n".join(chapter_preview),
+                        inline=False
+                    )
+            
+            # Library status
+            if manga.get('inLibrary'):
+                categories = manga.get('categories', {}).get('nodes', [])
+                cat_names = [cat['name'] for cat in categories]
+                status_text = "✅ **In Library**"
+                if cat_names:
+                    status_text += f"\nCategories: {', '.join(cat_names)}"
+                
+                # Add library added date if available
+                if manga.get('inLibraryAt'):
+                    try:
+                        # Convert timestamp to date
+                        added_date = datetime.fromtimestamp(manga['inLibraryAt'] / 1000)
+                        status_text += f"\nAdded: {added_date.strftime('%Y-%m-%d')}"
+                    except:
+                        pass
+                
+                embed.add_field(name="📚 Library Status", value=status_text, inline=False)
+            
+            # Source information
+            source = manga.get('source', {})
+            if not source:
+                source = self.selected_manga.get('source', {})
+            
+            source_name = source.get('displayName', 'Unknown')
+            source_lang = source.get('lang', 'Unknown').upper()
+            
+            footer_text = f"Source: {source_name} ({source_lang}) | ID: {manga_id}"
+            
+            # Add last fetched info if available
+            if manga.get('lastFetchedAt'):
+                try:
+                    last_fetch = datetime.fromtimestamp(manga['lastFetchedAt'] / 1000)
+                    time_ago = datetime.now() - last_fetch
+                    if time_ago.days > 0:
+                        footer_text += f" | Updated {time_ago.days}d ago"
+                    elif time_ago.seconds > 3600:
+                        footer_text += f" | Updated {time_ago.seconds // 3600}h ago"
+                    else:
+                        footer_text += f" | Updated recently"
+                except:
+                    pass
+            
+            embed.set_footer(text=footer_text)
+            
+            # Create view with action buttons
+            button_view = MangaActionView(self.bot, manga, timeout=300)
+            
+            # Send response with or without image attachment
+            if image_file:
+                await interaction.edit_original_response(
+                    content=None,
+                    embed=embed,
+                    view=button_view,
+                    attachments=[image_file]
+                )
+            else:
+                await interaction.edit_original_response(
+                    content=None,
+                    embed=embed,
+                    view=button_view
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in select_callback: {e}", exc_info=True)
             await interaction.edit_original_response(
-                content="❌ Failed to load manga details.",
+                content="❌ An error occurred while loading manga details. Please try again.",
                 view=None
             )
-            return
-        
-        manga = manga_details['manga']
-        
-        # Create detailed embed with cover
-        embed = discord.Embed(
-            title=manga['title'],
-            description=manga.get('description', 'No description available')[:1000],
-            color=discord.Color.blue()
-        )
-        
-        # Add cover image
-        if manga.get('thumbnailUrl'):
-            embed.set_thumbnail(url=manga['thumbnailUrl'])
-        
-        # Author and Artist
-        author = manga.get('author', 'Unknown')
-        artist = manga.get('artist', 'Unknown')
-        if author == artist or not artist:
-            embed.add_field(name="👤 Creator", value=author, inline=True)
-        else:
-            embed.add_field(name="✍️ Author", value=author, inline=True)
-            embed.add_field(name="🎨 Artist", value=artist, inline=True)
-        
-        # Status and Chapters
-        status = manga.get('status', 'UNKNOWN')
-        status_emoji = {
-            "ONGOING": "📖",
-            "COMPLETED": "✅",
-            "LICENSED": "©️",
-            "HIATUS": "⏸️",
-            "CANCELLED": "❌",
-            "UNKNOWN": "❓"
-        }.get(status, "❓")
-        
-        embed.add_field(
-            name="📊 Status",
-            value=f"{status_emoji} {status}",
-            inline=True
-        )
-        
-        total_chapters = manga.get('chapters', {}).get('totalCount', 0)
-        embed.add_field(
-            name="📚 Chapters",
-            value=str(total_chapters),
-            inline=True
-        )
-        
-        # Genres
-        genres = manga.get('genre', [])
-        if genres:
-            genre_text = ", ".join(genres[:10])  # Limit to 10 genres
-            embed.add_field(
-                name="🏷️ Genres",
-                value=genre_text,
-                inline=False
-            )
-        
-        # Library status
-        in_library = manga.get('inLibrary', False)
-        categories = manga.get('categories', {}).get('nodes', [])
-        
-        if in_library:
-            cat_names = [cat['name'] for cat in categories]
-            embed.add_field(
-                name="📚 Library Status",
-                value=f"✅ In Library\nCategories: {', '.join(cat_names) if cat_names else 'None'}",
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="📚 Library Status",
-                value="➕ Not in Library",
-                inline=False
-            )
-        
-        # Add source info
-        source_name = self.selected_manga.get('source', {}).get('displayName', 'Unknown')
-        embed.set_footer(text=f"Source: {source_name} | Manga ID: {manga_id}")
-        
-        # Create view with "Add to Library" button
-        button_view = MangaActionView(self.bot, manga, timeout=300)
-        
-        await interaction.edit_original_response(
-            content=None,
-            embed=embed,
-            view=button_view
-        )
-        
-        # Stop this view
-        self.stop()
+        finally:
+            # Stop this view
+            self.stop()
 
 
 class MangaActionView(discord.ui.View):
@@ -216,120 +416,162 @@ class MangaActionView(discord.ui.View):
         button.label = "Adding..."
         await interaction.edit_original_response(view=self)
         
-        # Step 1: Add to library
-        add_mutation = """
-        mutation AddToLibrary($id: Int!) {
-            updateManga(input: {
-                id: $id
-                patch: {
-                    inLibrary: true
-                    updateStrategy: ALWAYS_UPDATE
-                }
-            }) {
-                manga {
-                    id
-                    title
-                    inLibrary
-                }
-            }
-        }
-        """
-        
-        add_result = await self.bot.graphql_query(add_mutation, {"id": self.manga_id})
-        
-        if not add_result or not add_result.get('updateManga'):
-            button.label = "❌ Failed to Add"
-            button.style = discord.ButtonStyle.danger
-            await interaction.edit_original_response(view=self)
-            return
-        
-        title = self.manga_data['title']
-        
-        # Step 2: Fetch chapters to download
-        chapters_query = """
-        query GetChapters($mangaId: Int!) {
-            manga(id: $mangaId) {
-                chapters {
-                    totalCount
-                    nodes {
+        try:
+            # Step 1: Add to library (without updateStrategy which doesn't exist in the patch)
+            add_mutation = """
+            mutation AddToLibrary($id: Int!) {
+                updateManga(input: {
+                    id: $id
+                    patch: {
+                        inLibrary: true
+                    }
+                }) {
+                    manga {
                         id
-                        chapterNumber
-                        name
+                        title
+                        inLibrary
                     }
                 }
             }
-        }
-        """
-        
-        chapters_data = await self.bot.graphql_query(chapters_query, {"mangaId": self.manga_id})
-        
-        if not chapters_data or not chapters_data.get('manga'):
-            button.label = "✅ Added (No Chapters)"
-            button.style = discord.ButtonStyle.secondary
-            await interaction.edit_original_response(view=self)
-            return
-        
-        chapters = chapters_data['manga']['chapters']['nodes']
-        total_chapters = len(chapters)
-        
-        if total_chapters == 0:
-            button.label = "✅ Added (No Chapters)"
-            button.style = discord.ButtonStyle.secondary
-            await interaction.edit_original_response(view=self)
-            return
-        
-        # Step 3: Queue all chapters for download
-        chapter_ids = [ch['id'] for ch in chapters]
-        
-        download_mutation = """
-        mutation DownloadChapters($chapterIds: [Int!]!) {
-            enqueueChapterDownloads(input: { chapterIds: $chapterIds }) {
-                downloadStatus {
-                    state
+            """
+            
+            add_result = await self.bot.graphql_query(add_mutation, {"id": self.manga_id})
+            
+            if not add_result or not add_result.get('updateManga'):
+                button.label = "❌ Failed to Add"
+                button.style = discord.ButtonStyle.danger
+                await interaction.edit_original_response(view=self)
+                return
+            
+            title = self.manga_data['title']
+            
+            # Step 2: Fetch chapters to download
+            chapters_query = """
+            query GetChapters($mangaId: Int!) {
+                manga(id: $mangaId) {
+                    chapters {
+                        totalCount
+                        nodes {
+                            id
+                            chapterNumber
+                            name
+                        }
+                    }
                 }
             }
-        }
-        """
-        
-        # Download in batches of 50 to avoid overwhelming the API
-        batch_size = 50
-        for i in range(0, len(chapter_ids), batch_size):
-            batch = chapter_ids[i:i + batch_size]
-            await self.bot.graphql_query(download_mutation, {"chapterIds": batch})
-            await asyncio.sleep(0.5)  # Small delay between batches
-        
-        # Update button to show success
-        button.label = f"✅ Added & Downloading {total_chapters} Chapters"
-        button.style = discord.ButtonStyle.secondary
-        
-        # Create success embed
-        success_embed = discord.Embed(
-            title="✅ Successfully Added to Library!",
-            description=f"**{title}**",
-            color=discord.Color.green()
-        )
-        
-        success_embed.add_field(
-            name="📥 Download Status",
-            value=f"Queued {total_chapters} chapters for download",
-            inline=False
-        )
-        
-        success_embed.add_field(
-            name="🔄 Auto-Update",
-            value="✅ Enabled - Will check for new chapters automatically",
-            inline=False
-        )
-        
-        success_embed.add_field(
-            name="💡 Next Steps",
-            value="• Use `/downloads` to monitor progress\n• Use `/updates` to check update status\n• Chapters will download in the background",
-            inline=False
-        )
-        
-        success_embed.set_footer(text=f"Manga ID: {self.manga_id}")
-        
-        await interaction.edit_original_response(embed=success_embed, view=self)
+            """
+            
+            chapters_data = await self.bot.graphql_query(chapters_query, {"mangaId": self.manga_id})
+            
+            if not chapters_data or not chapters_data.get('manga'):
+                button.label = "✅ Added (No Chapters)"
+                button.style = discord.ButtonStyle.secondary
+                await interaction.edit_original_response(view=self)
+                return
+            
+            chapters = chapters_data['manga']['chapters']['nodes']
+            total_chapters = len(chapters)
+            
+            if total_chapters == 0:
+                button.label = "✅ Added (No Chapters)"
+                button.style = discord.ButtonStyle.secondary
+                await interaction.edit_original_response(view=self)
+                return
+            
+            # Step 3: Queue all chapters for download
+            chapter_ids = [ch['id'] for ch in chapters]
+            
+            download_mutation = """
+            mutation DownloadChapters($chapterIds: [Int!]!) {
+                enqueueChapterDownloads(input: { chapterIds: $chapterIds }) {
+                    downloadStatus {
+                        state
+                    }
+                }
+            }
+            """
+            
+            # Download in batches of 50 to avoid overwhelming the API
+            batch_size = 50
+            download_success = True
+            downloaded_count = 0
+            
+            for i in range(0, len(chapter_ids), batch_size):
+                batch = chapter_ids[i:i + batch_size]
+                result = await self.bot.graphql_query(download_mutation, {"chapterIds": batch})
+                if not result:
+                    download_success = False
+                    break
+                downloaded_count += len(batch)
+                await asyncio.sleep(0.5)  # Small delay between batches
+            
+            # Update button to show success
+            if download_success:
+                button.label = f"✅ Added & Queued {total_chapters} Chapters"
+                button.style = discord.ButtonStyle.secondary
+                
+                # Create success embed
+                success_embed = discord.Embed(
+                    title="✅ Successfully Added to Library!",
+                    description=f"**{title}**",
+                    color=discord.Color.green()
+                )
+                
+                success_embed.add_field(
+                    name="📥 Download Status",
+                    value=f"Queued {total_chapters} chapters for download",
+                    inline=False
+                )
+                
+                success_embed.add_field(
+                    name="📝 Note on Auto-Updates",
+                    value="To enable automatic chapter updates:\n" +
+                          "• Go to your Suwayomi web interface\n" +
+                          "• Navigate to Settings → Library\n" +
+                          "• Enable automatic updates\n" +
+                          "• Or use the library update commands",
+                    inline=False
+                )
+                
+                success_embed.add_field(
+                    name="💡 Next Steps",
+                    value="• Use `/downloads` to monitor progress\n" +
+                          "• Use `/updates` to manually check for new chapters\n" +
+                          "• Use `/update_library` to update all library manga\n" +
+                          "• Chapters will download in the background",
+                    inline=False
+                )
+                
+                success_embed.set_footer(text=f"Manga ID: {self.manga_id}")
+                
+                await interaction.edit_original_response(embed=success_embed, view=self)
+            else:
+                button.label = f"✅ Added (Queued {downloaded_count}/{total_chapters})"
+                button.style = discord.ButtonStyle.warning
+                
+                warning_embed = discord.Embed(
+                    title="⚠️ Partially Added to Library",
+                    description=f"**{title}**\n\nManga was added but some chapters couldn't be queued.",
+                    color=discord.Color.yellow()
+                )
+                warning_embed.add_field(
+                    name="Status",
+                    value=f"Queued {downloaded_count} of {total_chapters} chapters",
+                    inline=False
+                )
+                await interaction.edit_original_response(embed=warning_embed, view=self)
+            
+        except Exception as e:
+            logger.error(f"Error adding manga to library: {e}", exc_info=True)
+            button.label = "❌ Error Occurred"
+            button.style = discord.ButtonStyle.danger
+            
+            error_embed = discord.Embed(
+                title="❌ Error Adding Manga",
+                description=f"An error occurred while adding the manga.\nError: {str(e)[:200]}",
+                color=discord.Color.red()
+            )
+            await interaction.edit_original_response(embed=error_embed, view=self)
     
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="cancel")
     async def cancel_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -1218,12 +1460,13 @@ class SuwayomiCog(commands.Cog):
         
         source_id = source['id']
         
-        # Fetch latest manga
+        # FIXED: Changed sourceId to source and added page parameter
         latest_mutation = """
-        mutation GetLatest($sourceId: LongString!) {
+        mutation GetLatest($source: LongString!, $page: Int!) {
             fetchSourceManga(input: {
-                sourceId: $sourceId
+                source: $source
                 type: LATEST
+                page: $page
             }) {
                 hasNextPage
                 mangas {
@@ -1236,7 +1479,7 @@ class SuwayomiCog(commands.Cog):
         }
         """
         
-        latest_data = await self.bot.graphql_query(latest_mutation, {"sourceId": source_id})
+        latest_data = await self.bot.graphql_query(latest_mutation, {"source": source_id, "page": 1})
         
         if not latest_data or not latest_data.get('fetchSourceManga'):
             await ctx.respond(f"❌ Failed to fetch latest from {source['displayName']}.")
@@ -1306,12 +1549,13 @@ class SuwayomiCog(commands.Cog):
         source = sources_data['sources']['nodes'][0]
         source_id = source['id']
         
-        # Fetch popular manga
+        # FIXED: Changed sourceId to source and added page parameter
         popular_mutation = """
-        mutation GetPopular($sourceId: LongString!) {
+        mutation GetPopular($source: LongString!, $page: Int!) {
             fetchSourceManga(input: {
-                sourceId: $sourceId
+                source: $source
                 type: POPULAR
+                page: $page
             }) {
                 hasNextPage
                 mangas {
@@ -1324,7 +1568,7 @@ class SuwayomiCog(commands.Cog):
         }
         """
         
-        popular_data = await self.bot.graphql_query(popular_mutation, {"sourceId": source_id})
+        popular_data = await self.bot.graphql_query(popular_mutation, {"source": source_id, "page": 1})
         
         if not popular_data or not popular_data.get('fetchSourceManga'):
             await ctx.respond(f"❌ Failed to fetch popular from {source['displayName']}.")
@@ -1357,7 +1601,7 @@ class SuwayomiCog(commands.Cog):
         
         await ctx.respond(embed=embed)
 
-    
+
     @slash_command(
         name="search",
         description="Search for manga across all sources"
@@ -1366,7 +1610,8 @@ class SuwayomiCog(commands.Cog):
         self,
         ctx: discord.ApplicationContext,
         query: Option(str, "What manga are you looking for?", required=True),
-        limit: Option(int, "Number of results per source", required=False, default=5, min_value=1, max_value=10)
+        limit: Option(int, "Number of results per source", required=False, default=5, min_value=1, max_value=10),
+        include_nsfw: Option(bool, "Include NSFW sources?", required=False, default=False)
     ):
         """
         Search for manga across all available sources.
@@ -1383,6 +1628,7 @@ class SuwayomiCog(commands.Cog):
                     name
                     displayName
                     lang
+                    isNsfw
                 }
             }
         }
@@ -1394,7 +1640,13 @@ class SuwayomiCog(commands.Cog):
             await ctx.respond("❌ Failed to fetch sources.")
             return
         
-        sources = sources_data['sources']['nodes']
+        all_sources = sources_data['sources']['nodes']
+        
+        # Filter out NSFW sources if not requested
+        if not include_nsfw:
+            sources = [s for s in all_sources if not s.get('isNsfw', False)]
+        else:
+            sources = all_sources
         
         # Send initial status
         status_embed = discord.Embed(
@@ -1411,12 +1663,14 @@ class SuwayomiCog(commands.Cog):
         for source in sources[:20]:  # Limit to first 20 sources to avoid timeout
             source_id = source['id']
             
+            # FIXED: Added page and changed sourceId to source
             search_mutation = """
-            mutation SearchSource($sourceId: LongString!, $searchTerm: String!) {
+            mutation SearchSource($source: LongString!, $searchTerm: String!, $page: Int!) {
                 fetchSourceManga(input: {
-                    sourceId: $sourceId
+                    source: $source
                     type: SEARCH
                     query: $searchTerm
+                    page: $page
                 }) {
                     mangas {
                         id
@@ -1424,6 +1678,7 @@ class SuwayomiCog(commands.Cog):
                         thumbnailUrl
                         inLibrary
                     }
+                    hasNextPage
                 }
             }
             """
@@ -1431,7 +1686,7 @@ class SuwayomiCog(commands.Cog):
             try:
                 search_data = await self.bot.graphql_query(
                     search_mutation,
-                    {"sourceId": source_id, "searchTerm": query}
+                    {"source": source_id, "searchTerm": query, "page": 1}  # Changed sourceId to source, added page
                 )
                 
                 if search_data and search_data.get('fetchSourceManga'):
@@ -1453,7 +1708,8 @@ class SuwayomiCog(commands.Cog):
                 await asyncio.sleep(0.3)
                 
             except Exception as e:
-                # Skip sources that fail
+                # Log the specific error for debugging
+                logger.debug(f"Error searching source {source.get('displayName', 'Unknown')}: {e}")
                 continue
         
         # Check if we found any results
@@ -1487,7 +1743,7 @@ class SuwayomiCog(commands.Cog):
         )
         
         results_embed.add_field(
-            name="🔍 Results",
+            name="📋 Results",
             value=f"**{min(25, len(unique_results))}** manga available in dropdown\n{'⚠️ Showing first 25 results' if len(unique_results) > 25 else ''}",
             inline=False
         )
@@ -1498,6 +1754,172 @@ class SuwayomiCog(commands.Cog):
         view = MangaSelectView(self.bot, unique_results)
         
         await status_message.edit(embed=results_embed, view=view)
+        
+    @slash_command(
+        name="update_library",
+        description="Manually trigger a library update to check for new chapters"
+    )
+    async def update_library(
+        self,
+        ctx: discord.ApplicationContext,
+        category: Option(str, "Update specific category (leave empty for all)", required=False, default=None)
+    ):
+        """Trigger a library update."""
+        await ctx.defer()
+        
+        try:
+            # If category specified, find it first
+            category_id = None
+            if category:
+                categories_query = """
+                query FindCategory($name: String!) {
+                    categories(filter: { name: { equalTo: $name } }) {
+                        nodes {
+                            id
+                            name
+                        }
+                    }
+                }
+                """
+                
+                cat_data = await self.bot.graphql_query(categories_query, {"name": category})
+                if cat_data and cat_data.get('categories', {}).get('nodes'):
+                    category_id = cat_data['categories']['nodes'][0]['id']
+                else:
+                    await ctx.respond(f"❌ Category '{category}' not found.")
+                    return
+            
+            # Start the update
+            if category_id:
+                update_mutation = """
+                mutation UpdateCategory($categoryId: Int!) {
+                    updateLibraryManga(input: { categories: [$categoryId] }) {
+                        updateStatus {
+                            isRunning
+                            completeJobs {
+                                mangas {
+                                    id
+                                    title
+                                }
+                            }
+                            runningJobs {
+                                mangas {
+                                    id
+                                    title  
+                                }
+                            }
+                            pendingJobs {
+                                mangas {
+                                    id
+                                    title
+                                }
+                            }
+                        }
+                    }
+                }
+                """
+                result = await self.bot.graphql_query(update_mutation, {"categoryId": category_id})
+            else:
+                # Update entire library
+                update_mutation = """
+                mutation UpdateAllLibrary {
+                    updateLibraryManga(input: {}) {
+                        updateStatus {
+                            isRunning
+                            completeJobs {
+                                mangas {
+                                    id
+                                    title
+                                }
+                            }
+                            runningJobs {
+                                mangas {
+                                    id
+                                    title
+                                }
+                            }
+                            pendingJobs {
+                                mangas {
+                                    id
+                                    title
+                                }
+                            }
+                        }
+                    }
+                }
+                """
+                result = await self.bot.graphql_query(update_mutation)
+            
+            if not result or not result.get('updateLibraryManga'):
+                await ctx.respond("❌ Failed to start library update.")
+                return
+            
+            status = result['updateLibraryManga']['updateStatus']
+            
+            # Count jobs
+            pending = len(status.get('pendingJobs', {}).get('mangas', []))
+            running = len(status.get('runningJobs', {}).get('mangas', []))
+            complete = len(status.get('completeJobs', {}).get('mangas', []))
+            total = pending + running + complete
+            
+            embed = discord.Embed(
+                title="🔄 Library Update Started",
+                description=f"Updating {'category: ' + category if category else 'entire library'}",
+                color=discord.Color.blue()
+            )
+            
+            embed.add_field(
+                name="📊 Initial Status",
+                value=f"• Total manga to check: {total}\n" +
+                      f"• Pending: {pending}\n" +
+                      f"• Running: {running}\n" +
+                      f"• Complete: {complete}",
+                inline=False
+            )
+            
+            embed.add_field(
+                name="💡 Info",
+                value="• New chapters will be downloaded automatically\n" +
+                      "• Use `/updates` to monitor progress\n" +
+                      "• Updates run in the background",
+                inline=False
+            )
+            
+            embed.set_footer(text="This may take several minutes depending on library size")
+            
+            await ctx.respond(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"Error starting library update: {e}", exc_info=True)
+            await ctx.respond(f"❌ Error starting update: {str(e)[:200]}")
+    
+    @slash_command(
+        name="stop_update",
+        description="Stop the currently running library update"
+    )
+    async def stop_update(self, ctx: discord.ApplicationContext):
+        """Stop library update."""
+        await ctx.defer()
+        
+        try:
+            stop_mutation = """
+            mutation StopUpdate {
+                updateStop(input: {}) {
+                    clientMutationId
+                }
+            }
+            """
+            
+            result = await self.bot.graphql_query(stop_mutation)
+            
+            if result:
+                await ctx.respond("⏹️ Library update stopped successfully.")
+            else:
+                await ctx.respond("❌ Failed to stop update (it may not be running).")
+                
+        except Exception as e:
+            logger.error(f"Error stopping update: {e}", exc_info=True)
+            await ctx.respond("❌ Error stopping update.")
 
 def setup(bot: discord.Bot):
     """
