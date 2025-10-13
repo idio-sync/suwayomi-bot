@@ -1,0 +1,8 @@
+# Discord Bot Framework
+py-cord>=2.4.0,<3.0.0
+
+# Async HTTP Client
+aiohttp>=3.9.0,<4.0.0
+
+# Environment Variables
+python-dotenv>=1.0.0,<2.0.0
