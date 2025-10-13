@@ -77,8 +77,9 @@ class SuwayomiBot(discord.Bot):
         # Command sync flag
         self.synced = False
         
-        # Token refresh management
+        # Task running flags
         self.token_refresh_task_running = False
+        self.presence_task_running = False
         
         logger.info("SuwayomiBot initialized")
 
@@ -152,6 +153,11 @@ class SuwayomiBot(discord.Bot):
         if not self.token_refresh_task_running:
             self.refresh_graphql_task.start()
             self.token_refresh_task_running = True
+        
+        # Start presence update task if not already running
+        if not self.presence_task_running:
+            self.update_presence_task.start()
+            self.presence_task_running = True
 
     def load_all_cogs(self):
         """Load all cogs from the cogs directory."""
@@ -320,6 +326,47 @@ class SuwayomiBot(discord.Bot):
         self._working_endpoint = None
         
         return None
+
+    async def update_bot_presence(self):
+        """Update the bot's presence with current library stats."""
+        query = """
+        query {
+            downloadedChapters: chapters(filter: {isDownloaded: {equalTo: true}}) {
+                totalCount
+            }
+        }
+        """
+        
+        try:
+            data = await self.graphql_query(query)
+            
+            if data and 'downloadedChapters' in data:
+                chapter_count = data['downloadedChapters'].get('totalCount', 0)
+                
+                # Format the count with commas for readability
+                formatted_count = f"{chapter_count:,}"
+                
+                # Update presence
+                activity = discord.Game(name=f"librarian with {formatted_count} chapters")
+                await self.change_presence(activity=activity)
+                
+                logger.info(f"Updated presence: {formatted_count} downloaded chapters")
+            else:
+                logger.warning("Failed to fetch chapter count for presence update")
+                
+        except Exception as e:
+            logger.error(f"Error updating bot presence: {e}", exc_info=True)
+
+    @tasks.loop(hours=1)
+    async def update_presence_task(self):
+        """Periodically update the bot's presence with library stats."""
+        logger.debug("Running periodic presence update...")
+        await self.update_bot_presence()
+
+    @update_presence_task.before_loop
+    async def before_presence_task(self):
+        """Wait until the bot is ready before starting presence task."""
+        await self.wait_until_ready()
 
     @tasks.loop(minutes=30)
     async def refresh_graphql_task(self):
