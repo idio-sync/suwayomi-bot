@@ -228,11 +228,26 @@ class SuwayomiBot(discord.Bot):
         Returns:
             The JSON response data or None if error
         """
+        # Store the working endpoint after first successful connection
+        if not hasattr(self, '_working_endpoint'):
+            self._working_endpoint = None
+        
         # Try both possible GraphQL endpoint paths
-        endpoints = [
+        endpoints = []
+        
+        # If we have a working endpoint, try it first
+        if self._working_endpoint:
+            endpoints.append(self._working_endpoint)
+        
+        # Add both possible endpoints
+        base_endpoints = [
             f"{self.config.SUWAYOMI_URL}/api/graphql",  # Most likely
             f"{self.config.SUWAYOMI_URL}/graphql"       # Alternative
         ]
+        
+        for endpoint in base_endpoints:
+            if endpoint not in endpoints:
+                endpoints.append(endpoint)
         
         headers = {
             "Authorization": f"Bearer {self.config.SUWAYOMI_API_KEY}",
@@ -250,11 +265,15 @@ class SuwayomiBot(discord.Bot):
             try:
                 logger.debug(f"Trying GraphQL endpoint: {graphql_url}")
                 
+                # Create a new session if the old one might be stale
+                if session.closed:
+                    session = await self.ensure_session()
+                
                 async with session.post(
                     graphql_url, 
                     json=payload, 
                     headers=headers,
-                    timeout=10
+                    timeout=aiohttp.ClientTimeout(total=15, connect=5)  # Increased timeout
                 ) as response:
                     if response.status == 404:
                         logger.debug(f"Endpoint {graphql_url} not found, trying next...")
@@ -264,7 +283,12 @@ class SuwayomiBot(discord.Bot):
                         result = await response.json()
                         if "errors" in result:
                             logger.error(f"GraphQL errors: {result['errors']}")
-                            return None
+                            # Don't return None immediately - the query might still have returned partial data
+                            if not result.get("data"):
+                                return None
+                        
+                        # Store the working endpoint for future use
+                        self._working_endpoint = graphql_url
                         logger.debug(f"✅ Using GraphQL endpoint: {graphql_url}")
                         return result.get("data")
                     else:
@@ -272,16 +296,29 @@ class SuwayomiBot(discord.Bot):
                         text = await response.text()
                         logger.error(f"Response: {text}")
                         
+            except asyncio.TimeoutError:
+                logger.debug(f"Timeout on {graphql_url}, trying next endpoint...")
+                continue
+            except aiohttp.ClientError as e:
+                logger.debug(f"Connection error on {graphql_url}: {e}")
+                # Reset session on connection errors
+                self.session = None
+                session = await self.ensure_session()
+                continue
             except Exception as e:
                 logger.debug(f"Error trying {graphql_url}: {e}")
                 continue
         
         # If we get here, no endpoint worked
         logger.error("❌ Could not find working GraphQL endpoint. Possible causes:")
-        logger.error("1. Suwayomi version is older than v1.0.0 (GraphQL was added in v1.0.0)")
-        logger.error("2. GraphQL endpoint is at a different path")
+        logger.error("1. Suwayomi server is not responding")
+        logger.error("2. Network connectivity issues")
         logger.error("3. Authentication is failing")
         logger.error(f"Tried endpoints: {endpoints}")
+        
+        # Reset the working endpoint since it failed
+        self._working_endpoint = None
+        
         return None
 
     @tasks.loop(minutes=30)
