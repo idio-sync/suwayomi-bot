@@ -22,6 +22,11 @@ A powerful Discord bot that integrates with [Suwayomi-Server](https://github.com
 - **Detailed Metadata** - Shows author, artist, genres, status, and chapter info
 - **NSFW Filtering** - Optional NSFW source filtering
 
+## Screenshots
+<p align="left">
+  <img src=".github/screenshots/Request.png" width="50%">
+</p>
+
 ## Prerequisites
 
 - **Python 3.8+**
