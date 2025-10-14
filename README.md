@@ -1,6 +1,6 @@
 # Suwayomi Discord Bot
 
-A powerful Discord bot that integrates with [Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server) to search, manage, and download manga directly from Discord.
+A Discord bot that integrates with [Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server) to search, manage, and download manga directly through Discord.
 
 ## Features
 
@@ -33,8 +33,14 @@ A powerful Discord bot that integrates with [Suwayomi-Server](https://github.com
 - **Suwayomi-Server** (running and accessible)
 - **Discord Bot Token** (from Discord Developer Portal)
 
-## Installation
+# Installation
 
+## Docker
+
+1. `docker pull idiosync000/suwayomi-bot:latest`
+2. Pass the environment variables (see below).
+
+## Local
 ### 1. Clone the Repository
 
 ```bash
