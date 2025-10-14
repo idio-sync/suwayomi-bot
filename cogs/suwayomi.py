@@ -10,6 +10,9 @@ import io
 
 logger = logging.getLogger('suwayomi_bot.cog')
 
+# Suwayomi logo for embed thumbnails
+SUWAYOMI_LOGO_URL = "https://raw.githubusercontent.com/idio-sync/suwayomi-bot/96eb7742c14a4356904069c1b66d87dc2b93e4c2/suwayomi_logo.png"
+
 class MangaSelectView(discord.ui.View):
     """View with dropdown for selecting manga from search results."""
     
@@ -52,7 +55,7 @@ class MangaSelectView(discord.ui.View):
         if path.startswith(('http://', 'https://')):
             return path
         
-        # Otherwise, prepend the Suwayomi base URL
+        # Otherwise, prepend the Suwayoshi base URL
         base_url = self.bot.config.SUWAYOMI_URL
         
         # Handle relative paths
@@ -85,7 +88,8 @@ class MangaSelectView(discord.ui.View):
             
             logger.debug(f"Fetching image from: {url}")
             
-            async with session.get(url, headers=headers, timeout=10) as resp:
+            # Reduced timeout from 10 to 5 seconds
+            async with session.get(url, headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     image_data = await resp.read()
                     
@@ -166,6 +170,7 @@ class MangaSelectView(discord.ui.View):
                     description="⚠️ Could not load full details. Basic information shown.",
                     color=discord.Color.orange()
                 )
+                basic_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
                 
                 # Try to add thumbnail from search result
                 image_file = None
@@ -206,6 +211,13 @@ class MangaSelectView(discord.ui.View):
             # If manga isn't initialized, fetch chapters to initialize it
             if not manga.get('initialized'):
                 logger.info(f"Manga {manga_id} not initialized, fetching chapters...")
+                
+                # Update loading message
+                await interaction.edit_original_response(
+                    content="📚 Initializing manga data...",
+                    view=self
+                )
+                
                 fetch_mutation = """
                 mutation FetchChapters($mangaId: Int!) {
                     fetchChapters(input: { mangaId: $mangaId }) {
@@ -217,8 +229,8 @@ class MangaSelectView(discord.ui.View):
                 fetch_result = await self.bot.graphql_query(fetch_mutation, {"mangaId": manga_id})
                 
                 if fetch_result and fetch_result.get('fetchChapters'):
-                    # Wait for fetch to complete
-                    await asyncio.sleep(2)
+                    # Small wait to allow data to propagate
+                    await asyncio.sleep(0.3)
                     
                     # Re-query to get updated data
                     updated_data = await self.bot.graphql_query(details_query, {"id": manga_id})
@@ -227,18 +239,16 @@ class MangaSelectView(discord.ui.View):
                             manga = updated_data['manga']
                         if updated_data.get('chapters'):
                             chapters_data = updated_data['chapters']
-                
-                fetch_result = await self.bot.graphql_query(fetch_mutation, {"mangaId": manga_id})
-                
-                if fetch_result and fetch_result.get('fetchChapters'):
-                    chapters_data = fetch_result['fetchChapters'].get('chapters', {})
-                    # Re-query manga to get updated metadata
-                    updated_manga = await self.bot.graphql_query(details_query, {"id": manga_id})
-                    if updated_manga and updated_manga.get('manga'):
-                        manga = updated_manga['manga']
-                        chapters_data = updated_manga.get('chapters', chapters_data)
             
             chapters_data = manga_details.get('chapters', {})
+            
+            # Start fetching the cover image in parallel (don't wait for it)
+            image_task = None
+            thumbnail_url = manga.get('thumbnailUrl')
+            if thumbnail_url:
+                full_image_url = self.build_full_url(thumbnail_url)
+                logger.debug(f"Starting background fetch of cover from: {full_image_url}")
+                image_task = asyncio.create_task(self.fetch_and_attach_image(full_image_url))
             
             # Create detailed embed
             embed = discord.Embed(
@@ -246,12 +256,13 @@ class MangaSelectView(discord.ui.View):
                 url=self.build_full_url(manga.get('realUrl')) if manga.get('realUrl') else None,
                 color=discord.Color.blue() if not manga.get('inLibrary') else discord.Color.green()
             )
+            embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
             
             # Add description (truncate if too long)
             description = (manga.get('description') or '').strip()
             if description:
-                if len(description) > 800:
-                    description = description[:797] + "..."
+                if len(description) > 200:
+                    description = description[:197] + "..."
                 embed.description = description
             else:
                 embed.description = "*No description available*"
@@ -261,14 +272,14 @@ class MangaSelectView(discord.ui.View):
             thumbnail_url = manga.get('thumbnailUrl')
             if thumbnail_url:
                 full_image_url = self.build_full_url(thumbnail_url)
-                logger.info(f"Attempting to fetch cover from: {full_image_url}")
+                logger.debug(f"Attempting to fetch cover from: {full_image_url}")
                 
                 # Try to fetch and attach the image
                 image_file = await self.fetch_and_attach_image(full_image_url)
                 if image_file:
                     # Set the embed to use the attached image
                     embed.set_image(url="attachment://manga_cover.jpg")
-                    logger.info("Successfully attached manga cover image")
+                    logger.debug("Successfully attached manga cover image")
                 else:
                     logger.warning(f"Failed to fetch image from {full_image_url}")
             
@@ -351,10 +362,21 @@ class MangaSelectView(discord.ui.View):
                 # Add library added date if available
                 if manga.get('inLibraryAt'):
                     try:
-                        # Convert timestamp to date
-                        added_date = datetime.fromtimestamp(int(manga['inLibraryAt']) / 1000)
-                        status_text += f"\nAdded: {added_date.strftime('%Y-%m-%d')}"
-                    except:
+                        timestamp = int(manga['inLibraryAt'])
+                        # Check if timestamp is in milliseconds or seconds
+                        # If it's a very small number, it's likely in seconds
+                        # Timestamps after year 2000 in seconds are > 946684800
+                        # Timestamps in milliseconds would be much larger
+                        if timestamp > 100000000000:  # Likely milliseconds
+                            added_date = datetime.fromtimestamp(timestamp / 1000)
+                        else:  # Likely seconds
+                            added_date = datetime.fromtimestamp(timestamp)
+                        
+                        # Only show date if it's reasonable (after 2000 and before 2100)
+                        if added_date.year >= 2000 and added_date.year < 2100:
+                            status_text += f"\nAdded: {added_date.strftime('%Y-%m-%d')}"
+                    except (ValueError, OSError):
+                        # Skip if timestamp is invalid
                         pass
                 
                 # Add bookmark count if available
@@ -377,15 +399,23 @@ class MangaSelectView(discord.ui.View):
             # Add last fetched info if available
             if manga.get('lastFetchedAt'):
                 try:
-                    last_fetch = datetime.fromtimestamp(int(manga['lastFetchedAt']) / 1000)
-                    time_ago = datetime.now() - last_fetch
-                    if time_ago.days > 0:
-                        footer_text += f" | Updated {time_ago.days}d ago"
-                    elif time_ago.seconds > 3600:
-                        footer_text += f" | Updated {time_ago.seconds // 3600}h ago"
-                    else:
-                        footer_text += f" | Updated recently"
-                except:
+                    timestamp = int(manga['lastFetchedAt'])
+                    # Check if timestamp is in milliseconds or seconds
+                    if timestamp > 100000000000:  # Likely milliseconds
+                        last_fetch = datetime.fromtimestamp(timestamp / 1000)
+                    else:  # Likely seconds
+                        last_fetch = datetime.fromtimestamp(timestamp)
+                    
+                    # Only show if date is reasonable
+                    if last_fetch.year >= 2000 and last_fetch.year < 2100:
+                        time_ago = datetime.now() - last_fetch
+                        if time_ago.days > 0:
+                            footer_text += f" | Updated {time_ago.days}d ago"
+                        elif time_ago.seconds > 3600:
+                            footer_text += f" | Updated {time_ago.seconds // 3600}h ago"
+                        else:
+                            footer_text += f" | Updated recently"
+                except (ValueError, OSError):
                     pass
             
             embed.set_footer(text=footer_text)
@@ -480,7 +510,8 @@ class MangaActionView(discord.ui.View):
             
             logger.debug(f"Fetching image from: {url}")
             
-            async with session.get(url, headers=headers, timeout=10) as resp:
+            # Reduced timeout from 10 to 5 seconds
+            async with session.get(url, headers=headers, timeout=5) as resp:
                 if resp.status == 200:
                     image_data = await resp.read()
                     
@@ -563,6 +594,7 @@ class MangaActionView(discord.ui.View):
                     description=f"**{title}** was added to library but couldn't fetch chapters from source.",
                     color=discord.Color.yellow()
                 )
+                warning_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
                 warning_embed.add_field(
                     name="💡 Try manually",
                     value="Check the Suwayomi web interface to manually fetch chapters.",
@@ -599,6 +631,7 @@ class MangaActionView(discord.ui.View):
                     description=f"**{title}** was added but no chapters were found.",
                     color=discord.Color.blue()
                 )
+                info_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
                 await interaction.edit_original_response(embed=info_embed, view=self)
                 return
             
@@ -616,6 +649,7 @@ class MangaActionView(discord.ui.View):
                     description=f"**{title}** was added but no chapters are available yet.",
                     color=discord.Color.blue()
                 )
+                info_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
                 await interaction.edit_original_response(embed=info_embed, view=self)
                 return
             
@@ -686,6 +720,7 @@ class MangaActionView(discord.ui.View):
                     description=f"**{title}**",
                     color=discord.Color.green()
                 )
+                success_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
                 
                 # Add metadata if available
                 if manga_info:
@@ -753,6 +788,7 @@ class MangaActionView(discord.ui.View):
                     description=f"**{title}**\n\nManga was added but some chapters couldn't be queued.",
                     color=discord.Color.yellow()
                 )
+                warning_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
                 warning_embed.add_field(
                     name="Status",
                     value=f"Queued {downloaded_count} of {total_chapters} chapters",
@@ -770,6 +806,7 @@ class MangaActionView(discord.ui.View):
                 description=f"An error occurred while adding the manga.\nError: {str(e)[:200]}",
                 color=discord.Color.red()
             )
+            error_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
             await interaction.edit_original_response(embed=error_embed, view=self)
 
 class SuwayomiCog(commands.Cog):
@@ -830,6 +867,7 @@ class SuwayomiCog(commands.Cog):
                 title="📚 Suwayomi Library Statistics",
                 color=discord.Color.green()
             )
+            embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
             
             embed.add_field(
                 name="📖 Library Manga", 
@@ -1005,6 +1043,7 @@ class SuwayomiCog(commands.Cog):
             title="⬇️ Download Status",
             color=discord.Color.blue() if state == "Running" else discord.Color.greyple()
         )
+        embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
         
         if queue:
             embed.add_field(name="\u200b", value="**Queue:**", inline=False)
@@ -1084,6 +1123,7 @@ class SuwayomiCog(commands.Cog):
             description=f"Query: **{query}**\n\nSearching across {len(sources)} sources...",
             color=discord.Color.blue()
         )
+        status_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
         status_message = await ctx.respond(embed=status_embed)
         
         # Search each source
@@ -1144,13 +1184,13 @@ class SuwayomiCog(commands.Cog):
         
         # Check if we found any results
         if not all_results:
-            await status_message.edit(
-                embed=discord.Embed(
-                    title="❌ No Results Found",
-                    description=f"No manga found matching '{query}' across {sources_searched} sources.\n\n**Tips:**\n• Try different search terms\n• Check spelling\n• Try more generic terms (e.g., 'naruto' instead of 'naruto shippuden')",
-                    color=discord.Color.red()
-                )
+            no_results_embed = discord.Embed(
+                title="❌ No Results Found",
+                description=f"No manga found matching '{query}' across {sources_searched} sources.\n\n**Tips:**\n• Try different search terms\n• Check spelling\n• Try more generic terms (e.g., 'naruto' instead of 'naruto shippuden')",
+                color=discord.Color.red()
             )
+            no_results_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
+            await status_message.edit(embed=no_results_embed)
             return
         
         # Remove duplicates based on title (keep first occurrence)
@@ -1171,6 +1211,7 @@ class SuwayomiCog(commands.Cog):
             description=f"Found {len(unique_results)} manga across {sources_searched} sources.\nSelect a manga from the dropdown below to see details.",
             color=discord.Color.green()
         )
+        results_embed.set_thumbnail(url=SUWAYOMI_LOGO_URL)
         
         results_embed.add_field(
             name="📋 Results",
