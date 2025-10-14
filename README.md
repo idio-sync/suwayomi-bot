@@ -234,12 +234,6 @@ Where X,XXX is the total number of downloaded chapters in your library.
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-### Development Setup
-
-1. Set `LOG_LEVEL=DEBUG` for verbose logging
-2. Use `GUILD_ID` for instant command testing
-3. Test against a non-production Suwayomi instance
-
 ## Support
 
 - **Suwayomi Issues**: [Suwayomi-Server GitHub](https://github.com/Suwayomi/Suwayomi-Server/issues)
